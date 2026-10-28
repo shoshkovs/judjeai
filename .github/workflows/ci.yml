@@ -1,0 +1,219 @@
+# test -> build -> deploy. Pull requests run the tests; a push to main also builds the images
+# into GitHub Container Registry and deploys them to production over SSH.
+# Deploy expects repository secrets SSH_PRIVATE_KEY, SSH_KNOWN_HOSTS, DEPLOY_HOST and
+# DEPLOY_USER (docs/DEPLOY.md, "GitHub Actions").
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Superseded test runs stop; a running deploy on main is never cancelled.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    container: python:3.12-slim-bookworm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m unittest discover -s tests_unit -v
+      - run: python tools/dependency_inventory.py --check
+
+  api-tests:
+    runs-on: ubuntu-24.04
+    container: python:3.12-slim-bookworm
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: judgeai
+          POSTGRES_PASSWORD: ephemeral-ci-only
+          POSTGRES_DB: judgeai_test
+        options: >-
+          --health-cmd "pg_isready -U judgeai" --health-interval 5s --health-timeout 5s
+          --health-retries 20
+    env:
+      POSTGRES_USER: judgeai
+      POSTGRES_PASSWORD: ephemeral-ci-only
+      POSTGRES_DB: judgeai_test
+      POSTGRES_HOST: postgres
+      LLM_PROVIDER: fake
+      DB_NULL_POOL: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install '.[dev]' ./packages/legal_core
+      - run: pytest tests tests_uploads tests_uploads_http tests_pdf tests_reading --cov=src
+      - run: pytest
+        working-directory: packages/legal_core
+      - run: >-
+          ruff check src tests packages/legal_core tests_browser tests_uploads
+          tests_uploads_http tests_pdf tests_reading
+      - run: >-
+          ruff format --check src tests packages/legal_core tests_browser tests_uploads
+          tests_uploads_http tests_pdf tests_reading
+
+  browser-auth:
+    runs-on: ubuntu-24.04
+    container: node:22-bookworm
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: judgeai
+          POSTGRES_PASSWORD: ephemeral-ci-only
+          POSTGRES_DB: judgeai_browser_test
+        options: >-
+          --health-cmd "pg_isready -U judgeai" --health-interval 5s --health-timeout 5s
+          --health-retries 20
+    env:
+      POSTGRES_USER: judgeai
+      POSTGRES_PASSWORD: ephemeral-ci-only
+      POSTGRES_DB: judgeai_browser_test
+      POSTGRES_HOST: postgres
+      LLM_PROVIDER: fake
+      DB_NULL_POOL: "true"
+      AUTH_COOKIE_SECURE: "false"
+      UPLOAD_DIR: /tmp/judgeai-browser-uploads
+      CORS_ORIGINS: http://127.0.0.1:5179
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update -qq && apt-get install -y -qq python3-venv
+      - run: python3 -m venv /tmp/acceptance-python
+      - run: |
+          . /tmp/acceptance-python/bin/activate
+          pip install '.[dev]' ./packages/legal_core 'playwright==1.64.1'
+          playwright install --with-deps chromium
+      - run: npm ci && npm test && npm run build
+        working-directory: verdikt-web
+      - run: |
+          . /tmp/acceptance-python/bin/activate
+          python tests_browser/auth_smoke.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-screenshots
+          path: acceptance-screenshots/*.png
+          retention-days: 7
+          if-no-files-found: ignore
+
+  build:
+    needs: [inventory, api-tests, browser-auth]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: api
+            context: .
+          - image: web
+            context: verdikt-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        run: echo "short=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.tag.outputs.short }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    environment:
+      name: production
+      url: https://esudya.ru
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    env:
+      DEPLOY_DIR: /opt/judgeai
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check deploy secrets
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          for name in SSH_PRIVATE_KEY SSH_KNOWN_HOSTS DEPLOY_HOST DEPLOY_USER; do
+            if [ -z "$(printenv "$name")" ]; then
+              echo "Repository secret $name is not set (docs/DEPLOY.md, GitHub Actions)"
+              exit 1
+            fi
+          done
+      - name: SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        # A pasted key often loses its final newline or carries CRLF, and OpenSSH then rejects
+        # it ("error in libcrypto"); normalize both. The values never reach the log.
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          (umask 077 && printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key)
+          printf '%s\n' "$SSH_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          ssh-add ~/.ssh/deploy_key
+      - name: Deploy
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          short="${GITHUB_SHA::8}"
+          printf 'API_IMAGE=%s/api:%s\nWEB_IMAGE=%s/web:%s\n' \
+            "$IMAGE_PREFIX" "$short" "$IMAGE_PREFIX" "$short" > deploy.env
+          scp -q deploy/docker-compose.prod.yml deploy/Caddyfile deploy.env \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_DIR}/"
+          # The job token lets the server pull this run's images even from private packages;
+          # it expires with the job, so no long-lived registry credential stays on the server.
+          printf '%s' "$GHCR_TOKEN" | ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "docker login ghcr.io -u '${GHCR_USER}' --password-stdin >/dev/null"
+          ssh "${DEPLOY_USER}@${DEPLOY_HOST}" "cd ${DEPLOY_DIR} \
+            && docker compose --env-file deploy.env -f docker-compose.prod.yml pull --quiet \
+            && docker compose --env-file deploy.env -f docker-compose.prod.yml up -d --remove-orphans; \
+            status=\$?; docker logout ghcr.io >/dev/null; exit \$status"
+      - name: Health check
+        run: |
+          i=0
+          until curl -fsS "https://esudya.ru/health" >/dev/null 2>&1; do
+            i=$((i+1))
+            if [ "$i" -ge 60 ]; then echo "Health check failed after 10 minutes"; exit 1; fi
+            sleep 10
+          done
+          echo "Health check passed: https://esudya.ru/health"
