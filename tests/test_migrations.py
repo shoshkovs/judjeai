@@ -89,3 +89,42 @@ def test_auth_backfill_and_rollback_preserve_old_case():
         )
     finally:
         command.upgrade(cfg, "head")
+
+
+def test_defendant_cards_downgrade_keeps_the_first_card_and_the_verdict():
+    import asyncio
+
+    from sqlalchemy import text
+
+    from src.db.session import async_session_factory
+
+    async def execute(sql):
+        async with async_session_factory() as db:
+            result = await db.execute(text(sql))
+            rows = result.all() if result.returns_rows else None
+            await db.commit()
+            return rows
+
+    card = (
+        "INSERT INTO precedent_cards (knowledge_verdict_id, defendant_no, text_sha256, "
+        "qualification_keys, mitigating, aggravating, applied_general, conditional, episodes, "
+        "fabula, extractor_version) VALUES ({v}, {n}, 'h', '{{}}', '{{}}', '{{}}', '{{}}', false, "
+        "'[]', '', 'precedent-card/2')"
+    )
+    [(verdict_id,)] = asyncio.run(
+        execute(
+            "INSERT INTO knowledge_verdicts (raw_text, source_type, status) "
+            "VALUES ('ruling', 'vsrf', 'indexed') "
+            "RETURNING id"
+        )
+    )
+    asyncio.run(execute(card.format(v=verdict_id, n=0)))
+    asyncio.run(execute(card.format(v=verdict_id, n=1)))
+    cfg = alembic_config()
+    command.downgrade(cfg, "0008_precedent_embeddings")
+    try:
+        assert asyncio.run(execute("SELECT count(*) FROM precedent_cards"))[0][0] == 1
+        assert asyncio.run(execute("SELECT count(*) FROM knowledge_verdicts"))[0][0] == 1
+    finally:
+        command.upgrade(cfg, "head")
+    assert asyncio.run(execute("SELECT defendant_no FROM precedent_cards"))[0][0] == 0

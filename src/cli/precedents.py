@@ -14,13 +14,13 @@ from src.application.similar_precedents import IndexPrecedents
 from src.db.session import async_session_factory
 from src.infrastructure.fastembed_embedder import FastembedEmbedder
 from src.infrastructure.precedent_store import SqlPrecedentStore
-from src.infrastructure.verdict_reader import RegexVerdictReader
+from src.infrastructure.verdict_reader import PracticeReader
 
 
 async def run_index(embedder=None) -> dict:
     async with async_session_factory() as db:
         use_case = IndexPrecedents(
-            SqlPrecedentStore(db), RegexVerdictReader(), embedder or FastembedEmbedder()
+            SqlPrecedentStore(db), PracticeReader(), embedder or FastembedEmbedder()
         )
         return asdict(await use_case.execute(CARD_EXTRACTOR_VERSION))
 

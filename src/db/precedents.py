@@ -1,8 +1,9 @@
 """Practice base: precedent cards, their extracted-field registry and fabula embeddings.
 
 A card is derived from a verdict of the knowledge base and keeps its provenance (verdict,
-text SHA-256, court, date, URL when known). The stored fabula is already anonymised; the raw
-text stays only in knowledge_verdicts.
+text SHA-256, court, date, URL when known). A ruling of a higher court gives one card per
+convicted person (defendant_no) with the court's outcome; a verdict gives card 0. The stored
+fabula is already anonymised; the raw text stays only in knowledge_verdicts.
 """
 
 from datetime import date, datetime
@@ -38,13 +39,20 @@ class PrecedentCardRow(Base):
             text("to_tsvector('russian', fabula)"),
             postgresql_using="gin",
         ),
+        UniqueConstraint(
+            "knowledge_verdict_id", "defendant_no", name="uq_precedent_card_verdict_defendant"
+        ),
+        UniqueConstraint("text_sha256", "defendant_no", name="uq_precedent_card_text_defendant"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     knowledge_verdict_id: Mapped[int] = mapped_column(
-        ForeignKey("knowledge_verdicts.id", ondelete="CASCADE"), unique=True
+        ForeignKey("knowledge_verdicts.id", ondelete="CASCADE")
     )
-    text_sha256: Mapped[str] = mapped_column(String(64), unique=True)
+    defendant_no: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    # "upheld" / "changed" for a sentence restated in a ruling; None for a verdict.
+    outcome: Mapped[str | None] = mapped_column(String(16))
+    text_sha256: Mapped[str] = mapped_column(String(64))
     uid: Mapped[str | None] = mapped_column(String(64), index=True)
     court_name: Mapped[str | None] = mapped_column(Text)
     decision_date: Mapped[date | None] = mapped_column(Date)

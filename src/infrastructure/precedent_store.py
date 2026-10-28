@@ -9,7 +9,7 @@ import re
 
 from legal_core.entities import MeasureUnit, PunishmentKind, PunishmentTerm
 from legal_core.precedents import PrecedentCard, PrecedentEpisode, Qualification, Recidivism
-from sqlalchemy import String, cast, func, literal, select
+from sqlalchemy import String, cast, func, literal, select, update
 from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +18,7 @@ from src.application.similar_precedents import StoredCard, VerdictSource
 from src.db.models import KnowledgeVerdict
 from src.db.precedents import PrecedentCardField, PrecedentCardRow, PrecedentEmbedding
 from src.domain.extraction import input_hash
-from src.domain.practice import PRIVATE_SOURCE_TYPES
+from src.domain.practice import NOT_PRACTICE, PRIVATE_SOURCE_TYPES
 
 _WORD = re.compile(r"[а-яё]{4,}", re.IGNORECASE)
 MAX_QUERY_WORDS = 40
@@ -91,6 +91,7 @@ class SqlPrecedentStore:
                 KnowledgeVerdict.id.not_in(has_card),
                 # Documents saved from users' cases are private and never become practice.
                 KnowledgeVerdict.source_type.not_in(PRIVATE_SOURCE_TYPES),
+                KnowledgeVerdict.status.is_distinct_from(NOT_PRACTICE),
             )
             .order_by(KnowledgeVerdict.id)
         )
@@ -99,10 +100,19 @@ class SqlPrecedentStore:
             for v in rows
         ]
 
-    async def is_duplicate(self, text_hash: str, uid: str | None) -> bool:
+    async def mark_not_practice(self, knowledge_verdict_id: int) -> None:
+        await self.db.execute(
+            update(KnowledgeVerdict)
+            .where(KnowledgeVerdict.id == knowledge_verdict_id)
+            .values(status=NOT_PRACTICE)
+        )
+        await self.db.commit()
+
+    async def is_duplicate(self, text_hash: str, uid: str | None, defendant_no: int = 0) -> bool:
         condition = PrecedentCardRow.text_sha256 == text_hash
         if uid:
             condition = condition | (PrecedentCardRow.uid == uid)
+        condition = condition & (PrecedentCardRow.defendant_no == defendant_no)
         return await self.db.scalar(select(func.count()).where(condition)) > 0
 
     async def save_card(
@@ -112,6 +122,8 @@ class SqlPrecedentStore:
         main = card.main_qualification
         row = PrecedentCardRow(
             knowledge_verdict_id=source.knowledge_verdict_id,
+            defendant_no=extraction.defendant_no,
+            outcome=extraction.outcome,
             text_sha256=extraction.text_hash,
             uid=source.uid,
             court_name=source.court_name,
@@ -245,7 +257,11 @@ class SqlPrecedentStore:
     async def cards_for_verdicts(self, verdict_ids: list[int]) -> dict[int, StoredCard]:
         if not verdict_ids:
             return {}
+        # The first convicted person of a ruling stands for the uploaded document.
         rows = await self.db.scalars(
-            select(PrecedentCardRow).where(PrecedentCardRow.knowledge_verdict_id.in_(verdict_ids))
+            select(PrecedentCardRow).where(
+                PrecedentCardRow.knowledge_verdict_id.in_(verdict_ids),
+                PrecedentCardRow.defendant_no == 0,
+            )
         )
         return {row.knowledge_verdict_id: _stored(row) for row in rows}

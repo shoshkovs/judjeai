@@ -3,6 +3,7 @@
 from src.application.precedent_cards import VerdictReading
 from src.infrastructure.circumstance_extractor import extract_circumstances
 from src.infrastructure.fabula import extract_fabula
+from src.infrastructure.ruling_reader import RulingReader, is_ruling
 from src.services.punishment_extractor import extract_imposed_sentence
 from src.services.verdict_segmenter import segment_verdict
 
@@ -26,3 +27,15 @@ class RegexVerdictReader:
             recidivism=circumstances.recidivism,
             recidivism_quote=circumstances.recidivism_quote,
         )
+
+    def read_all(self, text: str) -> list[VerdictReading]:
+        return [self.read(text)]
+
+
+class PracticeReader(RegexVerdictReader):
+    """Reader of the practice base: a ruling gives a reading per convicted person."""
+
+    def read_all(self, text: str) -> list[VerdictReading]:
+        if is_ruling(text):
+            return RulingReader().read_all(text)
+        return [self.read(text)]

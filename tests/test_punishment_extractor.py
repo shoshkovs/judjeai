@@ -23,6 +23,13 @@ def test_parse_term_digits_words_and_dative():
     assert parse_term("на усмотрение суда") == (None, None)
 
 
+def test_parse_term_nominative_teens_and_hundreds():
+    # Restated sentences in appeal rulings use the nominative: "назначено пятнадцать лет".
+    assert parse_term("пятнадцать лет два месяца") == (182, MeasureUnit.MONTHS)
+    assert parse_term("восемнадцать лет") == (216, MeasureUnit.MONTHS)
+    assert parse_term("двести сорок часов") == (240, MeasureUnit.HOURS)
+
+
 def test_multi_count_with_aggregation():
     sentence = extract_imposed_sentence(_operative(MULTI_COUNT)).sentence
     assert [c.reference for c in sentence.counts] == [

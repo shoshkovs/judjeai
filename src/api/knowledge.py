@@ -12,7 +12,7 @@ from src.db.models import KnowledgeChunk, KnowledgeVerdict
 from src.domain.documents import reading_warnings
 from src.domain.practice import PRIVATE_SOURCE_TYPES
 from src.infrastructure.precedent_store import SqlPrecedentStore
-from src.infrastructure.verdict_reader import RegexVerdictReader
+from src.infrastructure.verdict_reader import PracticeReader
 from src.schemas.knowledge import (
     KnowledgeListResponse,
     KnowledgeUploadItem,
@@ -47,9 +47,7 @@ async def _index_cards(db, embedder: EmbeddingPort, verdict_ids: list[int]):
     """Build cards for the new verdicts (regex, fast) and return the cards of the uploaded ones."""
     store = SqlPrecedentStore(db)
     try:
-        await IndexPrecedents(store, RegexVerdictReader(), embedder).build_cards(
-            CARD_EXTRACTOR_VERSION
-        )
+        await IndexPrecedents(store, PracticeReader(), embedder).build_cards(CARD_EXTRACTOR_VERSION)
     except Exception:  # the verdicts are saved; `python -m src.cli.precedents index` retries
         logger.exception("precedent cards were not built on upload")
         await db.rollback()
@@ -59,7 +57,7 @@ async def _index_cards(db, embedder: EmbeddingPort, verdict_ids: list[int]):
 async def _embed_precedents(embedder: EmbeddingPort) -> None:
     async with db_session.async_session_factory() as db:
         store = SqlPrecedentStore(db)
-        await IndexPrecedents(store, RegexVerdictReader(), embedder).embed_pending()
+        await IndexPrecedents(store, PracticeReader(), embedder).embed_pending()
 
 
 @router.post("/verdicts/upload", response_model=KnowledgeUploadResponse)

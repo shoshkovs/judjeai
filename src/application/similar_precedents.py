@@ -20,7 +20,7 @@ from legal_core.rules.precedent_matching import (
     reciprocal_rank_fusion,
 )
 
-from src.application.precedent_cards import CardExtraction, VerdictReader, build_card
+from src.application.precedent_cards import CardExtraction, MultiVerdictReader, build_cards
 from src.domain.embedding_text import build_embedding_text
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,11 @@ class StoredCard:
 class PrecedentStore(Protocol):
     async def pending_verdicts(self, extractor_version: str) -> list[VerdictSource]: ...
 
-    async def is_duplicate(self, text_hash: str, uid: str | None) -> bool: ...
+    async def is_duplicate(
+        self, text_hash: str, uid: str | None, defendant_no: int = 0
+    ) -> bool: ...
+
+    async def mark_not_practice(self, knowledge_verdict_id: int) -> None: ...
 
     async def save_card(
         self, source: VerdictSource, extraction: CardExtraction, embedding_text: str
@@ -108,19 +112,24 @@ class VectorsReport:
 class IndexPrecedents:
     """Cards are cheap (regex) and built first; vectors need a model and may fail on their own."""
 
-    def __init__(self, store: PrecedentStore, reader: VerdictReader, embedder: EmbeddingPort):
+    def __init__(self, store: PrecedentStore, reader: MultiVerdictReader, embedder: EmbeddingPort):
         self.store, self.reader, self.embedder = store, reader, embedder
 
     async def build_cards(self, extractor_version: str) -> CardsReport:
         cards = duplicates = 0
         for source in await self.store.pending_verdicts(extractor_version):
-            extraction = build_card(self.reader, source.text)
-            if await self.store.is_duplicate(extraction.text_hash, source.uid):
-                duplicates += 1
-                continue
-            embedding_text = build_embedding_text(extraction.card.fabula)
-            await self.store.save_card(source, extraction, embedding_text)
-            cards += 1
+            extractions = build_cards(self.reader, source.text)
+            if not extractions:  # an annulled sentence or an acquittal: never read it again
+                await self.store.mark_not_practice(source.knowledge_verdict_id)
+            for extraction in extractions:
+                if await self.store.is_duplicate(
+                    extraction.text_hash, source.uid, extraction.defendant_no
+                ):
+                    duplicates += 1
+                    continue
+                embedding_text = build_embedding_text(extraction.card.fabula)
+                await self.store.save_card(source, extraction, embedding_text)
+                cards += 1
         return CardsReport(cards, duplicates)
 
     async def embed_pending(self, batch: int = 32) -> VectorsReport:

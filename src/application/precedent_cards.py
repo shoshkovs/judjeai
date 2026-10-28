@@ -3,6 +3,9 @@
 The same code reads the user's draft (the query) and every verdict of the practice base, so
 both sides of a comparison are extracted identically. Reading the text is delegated to a
 VerdictReader port; this module only assembles the domain card and its provenance.
+
+A ruling of a higher court restates the sentences of several convicted persons; the practice
+base keeps one card per person (defendant_no) together with the higher court's outcome.
 """
 
 from dataclasses import dataclass
@@ -18,7 +21,7 @@ from legal_core.precedents import (
 
 from src.domain.extraction import ExtractedField, ExtractionMethod, input_hash
 
-CARD_EXTRACTOR_VERSION = "precedent-card/1"
+CARD_EXTRACTOR_VERSION = "precedent-card/2"
 
 
 @dataclass(frozen=True)
@@ -35,10 +38,17 @@ class VerdictReading:
     applied_general: dict[str, str]
     recidivism: Recidivism | None
     recidivism_quote: str
+    # Set for a person's sentence restated in a ruling: "upheld" or "changed".
+    outcome: str | None = None
+    outcome_quote: str = ""
 
 
 class VerdictReader(Protocol):
     def read(self, text: str) -> VerdictReading: ...
+
+
+class MultiVerdictReader(VerdictReader, Protocol):
+    def read_all(self, text: str) -> list[VerdictReading]: ...
 
 
 @dataclass(frozen=True)
@@ -46,6 +56,8 @@ class CardExtraction:
     card: PrecedentCard
     fields: tuple[ExtractedField, ...]
     text_hash: str
+    defendant_no: int = 0
+    outcome: str | None = None
 
 
 def _term_json(term: PunishmentTerm | None) -> dict | None:
@@ -73,7 +85,15 @@ def _episodes(reading: VerdictReading) -> tuple[PrecedentEpisode, ...]:
 
 
 def build_card(reader: VerdictReader, text: str) -> CardExtraction:
-    reading = reader.read(text)
+    return _extraction(reader.read(text), text, 0)
+
+
+def build_cards(reader: MultiVerdictReader, text: str) -> list[CardExtraction]:
+    """One card per convicted person; a first-instance verdict gives exactly one."""
+    return [_extraction(reading, text, n) for n, reading in enumerate(reader.read_all(text))]
+
+
+def _extraction(reading: VerdictReading, text: str, defendant_no: int) -> CardExtraction:
     episodes = _episodes(reading)
     sentence = reading.sentence
     card = PrecedentCard(
@@ -126,7 +146,9 @@ def build_card(reader: VerdictReader, text: str) -> CardExtraction:
         ),
         found("fabula", reading.fabula or None, reading.fabula[:300]),
     )
-    return CardExtraction(card, fields, source)
+    if reading.outcome is not None:
+        fields += (found("ruling_outcome", reading.outcome, reading.outcome_quote),)
+    return CardExtraction(card, fields, source, defendant_no, reading.outcome)
 
 
 def query_card(reader: VerdictReader, texts: list[str]) -> PrecedentCard | None:
