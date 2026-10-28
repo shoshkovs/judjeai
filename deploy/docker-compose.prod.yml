@@ -31,7 +31,7 @@ services:
         max-file: "5"
 
   web:
-    image: ${WEB_IMAGE:-registry.gitlab.com/judgeai/judgeai/web:latest}
+    image: ${WEB_IMAGE:-ghcr.io/shoshkovs/judjeai/web:latest}
     container_name: judgeai_web
     depends_on:
       - api
@@ -39,7 +39,7 @@ services:
     logging: *logging
 
   migrate:
-    image: ${API_IMAGE:-registry.gitlab.com/judgeai/judgeai/api:latest}
+    image: ${API_IMAGE:-ghcr.io/shoshkovs/judjeai/api:latest}
     container_name: judgeai_migrate
     command: ["alembic", "upgrade", "head"]
     env_file:
@@ -51,7 +51,7 @@ services:
     logging: *logging
 
   api:
-    image: ${API_IMAGE:-registry.gitlab.com/judgeai/judgeai/api:latest}
+    image: ${API_IMAGE:-ghcr.io/shoshkovs/judjeai/api:latest}
     container_name: judgeai_api
     env_file:
       - .env
